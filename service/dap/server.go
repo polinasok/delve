@@ -331,14 +331,16 @@ func (s *Server) onLaunchRequest(request *dap.LaunchRequest) {
 func (s *Server) onDisconnectRequest(request *dap.DisconnectRequest) {
 	s.send(&dap.DisconnectResponse{Response: *newResponse(request.Request)})
 	// TODO(polina): only halt if the program is running
-	_, err := s.debugger.Command(&api.DebuggerCommand{Name: api.Halt})
-	if err != nil {
-		s.log.Error(err)
-	}
-	kill := s.config.AttachPid == 0
-	err = s.debugger.Detach(kill)
-	if err != nil {
-		s.log.Error(err)
+	if s.debugger != nil {
+		_, err := s.debugger.Command(&api.DebuggerCommand{Name: api.Halt})
+		if err != nil {
+			s.log.Error(err)
+		}
+		kill := s.config.AttachPid == 0
+		err = s.debugger.Detach(kill)
+		if err != nil {
+			s.log.Error(err)
+		}
 	}
 	// TODO(polina): make thread-safe when handlers become asynchronous.
 	s.signalDisconnect()

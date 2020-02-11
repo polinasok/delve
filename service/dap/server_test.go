@@ -130,5 +130,9 @@ func TestBadLaunchRequests(t *testing.T) {
 
 		client.LaunchRequest(fixture.Source, true)
 		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":2,"success":false,"command":"launch","message":"Failed to launch","body":{"error":{"id":3000,"format":"Failed to launch: not an executable file"}}}`))
+
+		// We failed to launch the program. Make sure shutdown still works.
+		client.DisconnectRequest()
+		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":3,"success":true,"command":"disconnect"}`))
 	})
 }
