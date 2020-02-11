@@ -352,9 +352,9 @@ func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
 	}
 	response := &dap.SetBreakpointsResponse{Response: *newResponse(request.Request)}
 	response.Body.Breakpoints = make([]dap.Breakpoint, len(request.Arguments.Breakpoints))
-	// Only verified breakpoints will be set and reported back in the response.
-	// All breakpoints resulting in errors (e.g. duplicates or lines that do not have
-	// statements) will be skipped.
+	// Only verified breakpoints will be set and reported bac in the
+	// response. All breakpoints resulting in errors (e.g. duplicates
+	// or lines that do not have statements) will be skipped.
 	i := 0
 	for _, b := range request.Arguments.Breakpoints {
 		bp, err := s.debugger.CreateBreakpoint(

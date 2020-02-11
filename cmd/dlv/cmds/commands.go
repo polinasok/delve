@@ -632,7 +632,6 @@ func waitForDisconnectSignal(disconnectChan chan struct{}) {
 		select {
 		case <-ch:
 		case <-disconnectChan:
-			fmt.Println("client disconnected!!!")
 		}
 	}
 }
