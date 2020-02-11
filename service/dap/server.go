@@ -142,9 +142,7 @@ func (s *Server) Run() {
 // until it encounters an error or EOF, when it sends
 // the disconnect signal and returns.
 func (s *Server) serveDAPCodec() {
-	defer func() {
-		s.signalDisconnect()
-	}()
+	defer s.signalDisconnect()
 	s.reader = bufio.NewReader(s.conn)
 	for {
 		request, err := dap.ReadProtocolMessage(s.reader)
@@ -252,7 +250,7 @@ func (s *Server) handleRequest(request dap.Message) {
 		s.sendUnsupportedErrorResponse(request.Request)
 	default:
 		// This is a DAP message that go-dap has a struct for, so
-		// decoding suceeded, but this function does not know how
+		// decoding succeeded, but this function does not know how
 		// to handle. We should be sending an ErrorResponse, but
 		// we cannot get to Seq and other fields from dap.Message.
 		// TODO(polina): figure out how to handle this better.
