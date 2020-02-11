@@ -17,26 +17,46 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Server implements a DAP server that can accept a single client for a single
-// debug session. It does not support restarting.
+// Package dap implements VSCode's Debug Adaptor Protocol (DAP).
+// This allows delve to communicate with frontends using DAP
+// without a separate adaptor. The frontend will run the debugger
+// (which now doubles as an adaptor) in server mode listening on
+// a port and communicating over TCP. This is work in progress,
+// so for now Delve in dap mode only supports synchronous
+// request-response communication, blocking while processing each request.
+// For DAP details see https://microsoft.github.io/debug-adapter-protocol.
+
+// Server implements a DAP server that can accept a single client for
+// a single debug session. It does not support restarting.
+// The server operates via two goroutines:
+// (1) Main goroutine where the server is created via NewServer(),
+// started via Run() and stopped via Stop().
+// (2) Run goroutine started from Run() that accepts a client connection,
+// reads, decodes and processes each request, issuing commands to the
+// underlying debugger and sending back events and responses.
+// TODO(polina): make it asynchronous (i.e. launch goroutine per request)
 type Server struct {
 	// config is all the information necessary to start the debugger and server.
 	config *service.Config
-	// listener is used to serve HTTP.
+	// listener is used to accept the client connection.
 	listener net.Listener
-	// conn is accepted client connection.
+	// conn is the accepted client connection.
 	conn net.Conn
-	// reader is used to read requests.
+	// reader is used to read requests from the connection.
 	reader *bufio.Reader
-	// debugger is the debugger service.
+	// debugger is the underlying debugger service.
 	debugger *debugger.Debugger
 	// log is used for structured logging.
 	log *logrus.Entry
-	// stopOnEntry is set to automatically stop program after start
+	// stopOnEntry is set to automatically stop the debugee after start.
 	stopOnEntry bool
 }
 
-// NewServer creates a new DAP Server.
+// NewServer creates a new DAP Server. It takes an opened Listener
+// via config and assumes its ownerhsip. Optinally takes DisconnectChan
+// via config, which can be used to detect when the client disconnects
+// and the server is ready to be shut down. The caller must call
+// Stop() on shutdown.
 func NewServer(config *service.Config) *Server {
 	logger := logflags.DAPLogger()
 	logflags.WriteDAPListeningMessage(config.Listener.Addr().String())
@@ -47,53 +67,101 @@ func NewServer(config *service.Config) *Server {
 	}
 }
 
-// Stop stops the DAP debugger service.
-// It kills the target process if it was launched by the debugger.
-func (s *Server) Stop() error {
+// Stop stops the DAP debugger service, closes the listener and
+// the client connection. It shuts down the underlying debugger
+// and kills the target process if it was launched by it.
+func (s *Server) Stop() {
 	s.listener.Close()
+	if s.conn != nil {
+		// Unless Stop() was called after serveDAPCodec()
+		// returned, this will result in closed connection error
+		// on next read, breaking out of the read loop and
+		// allowing the run goroutine to exit.
+		s.conn.Close()
+	}
 	if s.debugger != nil {
 		kill := s.config.AttachPid == 0
-		return s.debugger.Detach(kill)
+		if err := s.debugger.Detach(kill); err != nil {
+			fmt.Println(err)
+		}
 	}
-	return nil
 }
 
-// Run starts a debugger and exposes it with an HTTP server. The debugger
-// itself can be stopped with the `detach` API. Run blocks until the HTTP
-// server stops.
+// signalDisconnect closes config.DisconnectChan if not nil, which
+// signals that the client disconnected or there was a client
+// connection failure. Since the server currently services only one
+// client, this can be used as a signal to the entire server via
+// Stop(). The function safeguards agaist closing the channel more
+// than once and can be called multiple times. It is not thread-safe
+// and is currently only called from the run goroutine.
+// TODO(polina): lock this when we add more goroutines that could call
+// this when we support asynchronous request-response communication.
+func (s *Server) signalDisconnect() {
+	// DisconnectChan might be nil at server creation if the
+	// caller does not want to rely on the disconnect signal.
+	if s.config.DisconnectChan != nil {
+		close(s.config.DisconnectChan)
+		// Take advantage of the nil check above to avoid accidentally
+		// closing the channel twice and causing a panic, when this
+		// function is called more than once. For example, we could
+		// have the following sequence of events:
+		// -- run goroutine: calls onDisconnectRequest()
+		// -- run goroutine: calls signalDisconnect()
+		// -- main goroutine: calls Stop()
+		// -- main goroutine: Stop() closes client connection
+		// -- run goroutine: serveDAPCodec() gets "closed network connection"
+		// -- run goroutine: serveDAPCodec() returns
+		// -- run goroutine: serveDAPCodec calls signalDisconnect()
+		s.config.DisconnectChan = nil
+	}
+}
+
+// Run launches a new goroutine where it accepts a client connection
+// and starts processing requests from it. Use Stop() to close connection.
+// The server does not support multiple clients, serially or in parallel.
+// The server should be restarted for every new debug session.
+// The debugger won't be started until launch/attach request is received.
+// TODO(polina): allow new client connections for new debug sessions,
+// so the editor needs to launch delve only once?
 func (s *Server) Run() {
 	go func() {
-		// For now, do not support multiple clients in dap mode, serially or in parallel.
-		// The server should be restarted for every new debug session.
-		// TODO(polina): allow new client connections for new debug sessions?
-		defer s.listener.Close()
 		conn, err := s.listener.Accept()
 		if err != nil {
-			panic(err)
+			// This will print if the server is killed with Ctrl+C
+			// before client connection is accepted.
+			fmt.Printf("Error accepting client connection: %s\n", err)
+			s.signalDisconnect()
+			return
 		}
 		s.conn = conn
-		go s.serveDAPCodec()
+		s.serveDAPCodec()
 	}()
 }
 
+// serveDAPCodec reads and decodes requests from the client
+// until it encounters an error or EOF, when it sends
+// the disconnect signal and returns.
 func (s *Server) serveDAPCodec() {
 	defer func() {
-		if s.config.DisconnectChan != nil {
-			close(s.config.DisconnectChan)
-		}
-		s.conn.Close()
+		s.signalDisconnect()
 	}()
 	s.reader = bufio.NewReader(s.conn)
 	for {
 		request, err := dap.ReadProtocolMessage(s.reader)
-		// TODO(polina): Differentiate between connection and decoding
-		// errors. If we get an unfamiliar request, should we respond
-		// with a no-op or an ErrorResponse?
+		// TODO(polina): Differentiate between errors and handle them
+		// gracefully. For example,
+		// -- "use of closed network connection" means client connection
+		// was closed via Stop() in response to a disconnect request.
+		// -- "Request command 'foo' is not supported" means we
+		// potentially got some new DAP request that we do not yet have
+		// decoding support for, so we can respond with an ErrorResponse.
+		// TODO(polina): to support this add Seq to
+		// dap.DecodeProtocolMessageFieldError.
 		if err != nil {
 			if err != io.EOF {
-				s.log.Error("DAP error:", err)
+				fmt.Println("DAP error:", err)
 			}
-			break
+			return
 		}
 		s.handleRequest(request)
 	}
@@ -110,20 +178,16 @@ func (s *Server) handleRequest(request dap.Message) {
 		s.onLaunchRequest(request)
 	case *dap.AttachRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onAttachRequest(request)
 	case *dap.DisconnectRequest:
 		s.onDisconnectRequest(request)
 	case *dap.TerminateRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onTerminateRequest(request)
 	case *dap.RestartRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onRestartRequest(request)
 	case *dap.SetBreakpointsRequest:
 		s.onSetBreakpointsRequest(request)
 	case *dap.SetFunctionBreakpointsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onSetFunctionBreakpointsRequest(request)
 	case *dap.SetExceptionBreakpointsRequest:
 		s.onSetExceptionBreakpointsRequest(request)
 	case *dap.ConfigurationDoneRequest:
@@ -132,91 +196,67 @@ func (s *Server) handleRequest(request dap.Message) {
 		s.onContinueRequest(request)
 	case *dap.NextRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onNextRequest(request)
 	case *dap.StepInRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onStepInRequest(request)
 	case *dap.StepOutRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onStepOutRequest(request)
 	case *dap.StepBackRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onStepBackRequest(request)
 	case *dap.ReverseContinueRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onReverseContinueRequest(request)
 	case *dap.RestartFrameRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onRestartFrameRequest(request)
 	case *dap.GotoRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onGotoRequest(request)
 	case *dap.PauseRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onPauseRequest(request)
 	case *dap.StackTraceRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onStackTraceRequest(request)
 	case *dap.ScopesRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onScopesRequest(request)
 	case *dap.VariablesRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onVariablesRequest(request)
 	case *dap.SetVariableRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onSetVariableRequest(request)
 	case *dap.SetExpressionRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onSetExpressionRequest(request)
 	case *dap.SourceRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onSourceRequest(request)
 	case *dap.ThreadsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onThreadsRequest(request)
 	case *dap.TerminateThreadsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onTerminateThreadsRequest(request)
 	case *dap.EvaluateRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onEvaluateRequest(request)
 	case *dap.StepInTargetsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onStepInTargetsRequest(request)
 	case *dap.GotoTargetsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onGotoTargetsRequest(request)
 	case *dap.CompletionsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onCompletionsRequest(request)
 	case *dap.ExceptionInfoRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onExceptionInfoRequest(request)
 	case *dap.LoadedSourcesRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onLoadedSourcesRequest(request)
 	case *dap.DataBreakpointInfoRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onDataBreakpointInfoRequest(request)
 	case *dap.SetDataBreakpointsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onSetDataBreakpointsRequest(request)
 	case *dap.ReadMemoryRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onReadMemoryRequest(request)
 	case *dap.DisassembleRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onDisassembleRequest(request)
 	case *dap.CancelRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onCancelRequest(request)
 	case *dap.BreakpointLocationsRequest:
 		s.sendUnsupportedErrorResponse(request.Request)
-		//s.onBreakpointLocationsRequest(request)
 	default:
-		// This should have been returned as an error from
-		// dap.ReadProtocolMessage(), so we should never reach here.
+		// This is a DAP message that go-dap has a struct for, so
+		// decoding suceeded, but this function does not know how
+		// to handle. We should be sending an ErrorResponse, but
+		// we cannot get to Seq and other fields from dap.Message.
+		// TODO(polina): figure out how to handle this better.
+		// Consider adding GetSeq() method to dap.Message interface.
 		panic(fmt.Sprintf("Unable to process %#v", request))
 	}
 }
@@ -280,13 +320,16 @@ func (s *Server) onLaunchRequest(request *dap.LaunchRequest) {
 		return
 	}
 
-	// Notify the client that the debugger is ready to start "accepting"
+	// Notify the client that the debugger is ready to start accepting
 	// configuration requests for setting breakpoints, etc. The client
 	// will end the configuration sequence with 'configurationDone'.
 	s.send(&dap.InitializedEvent{Event: *newEvent("initialized")})
 	s.send(&dap.LaunchResponse{Response: *newResponse(request.Request)})
 }
 
+// onDisconnectRequest handles the DisconnectRequest. Per the DAP spec,
+// it disconnects the debuggee and signals that the debug adaptor
+// (in our case this TCP server) can be terminated.
 func (s *Server) onDisconnectRequest(request *dap.DisconnectRequest) {
 	s.send(&dap.DisconnectResponse{Response: *newResponse(request.Request)})
 	// TODO(polina): only halt if the program is running
@@ -299,10 +342,8 @@ func (s *Server) onDisconnectRequest(request *dap.DisconnectRequest) {
 	if err != nil {
 		s.log.Error(err)
 	}
-	if s.config.DisconnectChan != nil {
-		close(s.config.DisconnectChan)
-		s.config.DisconnectChan = nil
-	}
+	// TODO(polina): make thread-safe when handlers become asynchronous.
+	s.signalDisconnect()
 }
 
 func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
@@ -311,6 +352,9 @@ func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
 	}
 	response := &dap.SetBreakpointsResponse{Response: *newResponse(request.Request)}
 	response.Body.Breakpoints = make([]dap.Breakpoint, len(request.Arguments.Breakpoints))
+	// Only verified breakpoints will be set and reported back in the response.
+	// All breakpoints resulting in errors (e.g. duplicates or lines that do not have
+	// statements) will be skipped.
 	i := 0
 	for _, b := range request.Arguments.Breakpoints {
 		bp, err := s.debugger.CreateBreakpoint(
@@ -328,8 +372,8 @@ func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
 }
 
 func (s *Server) onSetExceptionBreakpointsRequest(request *dap.SetExceptionBreakpointsRequest) {
-	// This request is always sent although we specify empty filters at initialization.
-	// Handle it as a no-op.
+	// Unlike what DAP documentation claims, this request is always sent
+	// even though we specified no filters at initializatin. Handle a no-op.
 	s.send(&dap.SetExceptionBreakpointsResponse{Response: *newResponse(request.Request)})
 }
 

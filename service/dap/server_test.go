@@ -1,22 +1,33 @@
-package service_test
+package dap
 
 import (
 	"bytes"
+	"flag"
 	"net"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/go-delve/delve/pkg/logflags"
 	protest "github.com/go-delve/delve/pkg/proc/test"
 	"github.com/go-delve/delve/service"
-	"github.com/go-delve/delve/service/dap"
+	"github.com/go-delve/delve/service/dap/daptest"
 )
 
-func startDAPServer(t *testing.T) (server *dap.Server, addr string) {
+func TestMain(m *testing.M) {
+	var logOutput string
+	flag.StringVar(&logOutput, "log-output", "", "configures log output")
+	flag.Parse()
+	logflags.Setup(logOutput != "", logOutput, "")
+	os.Exit(protest.RunTestsWithFixtures(m))
+}
+
+func startDAPServer(t *testing.T) (server *Server, addr string) {
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	server = dap.NewServer(&service.Config{
+	server = NewServer(&service.Config{
 		Listener:       listener,
 		Backend:        "default",
 		DisconnectChan: nil,
@@ -27,7 +38,7 @@ func startDAPServer(t *testing.T) (server *dap.Server, addr string) {
 	return server, listener.Addr().String()
 }
 
-func expectMessage(t *testing.T, client *DAPClient, want []byte) {
+func expectMessage(t *testing.T, client *daptest.Client, want []byte) {
 	got, err := client.ReadBaseMessage()
 	if err != nil {
 		t.Error(err)
@@ -38,20 +49,23 @@ func expectMessage(t *testing.T, client *DAPClient, want []byte) {
 }
 
 // name is for _fixtures/<name>.go
-func runTest(t *testing.T, name string, test func(c *DAPClient, f protest.Fixture)) {
+func runTest(t *testing.T, name string, test func(c *daptest.Client, f protest.Fixture)) {
 	var buildFlags protest.BuildFlags
 	fixture := protest.BuildFixture("helloworld", buildFlags)
 
 	server, addr := startDAPServer(t)
-	client := NewDAPClient(addr)
+	client := daptest.NewClient(addr)
 	defer client.Close()
 	defer server.Stop()
 
 	test(client, fixture)
 }
 
+// TODO(polina): instead of hardcoding message bytes,
+// add methods to client to receive, decode and verify responses.
+
 func TestStopOnEntry(t *testing.T) {
-	runTest(t, "helloworld", func(client *DAPClient, fixture protest.Fixture) {
+	runTest(t, "helloworld", func(client *daptest.Client, fixture protest.Fixture) {
 		client.InitializeRequest()
 		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":0,"success":true,"command":"initialize","body":{"supportsConfigurationDoneRequest":true}}`))
 
@@ -76,7 +90,7 @@ func TestStopOnEntry(t *testing.T) {
 }
 
 func TestSetBreakpoint(t *testing.T) {
-	runTest(t, "helloworld", func(client *DAPClient, fixture protest.Fixture) {
+	runTest(t, "helloworld", func(client *daptest.Client, fixture protest.Fixture) {
 		client.InitializeRequest()
 		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":0,"success":true,"command":"initialize","body":{"supportsConfigurationDoneRequest":true}}`))
 
@@ -84,7 +98,7 @@ func TestSetBreakpoint(t *testing.T) {
 		expectMessage(t, client, []byte(`{"seq":0,"type":"event","event":"initialized"}`))
 		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":1,"success":true,"command":"launch"}`))
 
-		client.SetBreakpointsRequest(fixture.Source, []int{8})
+		client.SetBreakpointsRequest(fixture.Source, []int{8, 100})
 		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":2,"success":true,"command":"setBreakpoints","body":{"breakpoints":[{"verified":true,"source":{},"line":8}]}}`))
 
 		client.SetExceptionBreakpointsRequest()
@@ -107,7 +121,7 @@ func TestSetBreakpoint(t *testing.T) {
 }
 
 func TestBadLaunchRequests(t *testing.T) {
-	runTest(t, "helloworld", func(client *DAPClient, fixture protest.Fixture) {
+	runTest(t, "helloworld", func(client *daptest.Client, fixture protest.Fixture) {
 		client.LaunchRequest("", true)
 		expectMessage(t, client, []byte(`{"seq":0,"type":"response","request_seq":0,"success":false,"command":"launch","message":"Failed to launch","body":{"error":{"id":3000,"format":"Failed to launch: The program attribute is missing in debug configuration."}}}`))
 

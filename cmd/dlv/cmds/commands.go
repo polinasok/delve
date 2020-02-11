@@ -396,8 +396,6 @@ func dapCmd(cmd *cobra.Command, args []string) {
 			fmt.Printf("couldn't start listener: %s\n", err)
 			return 1
 		}
-		defer listener.Close()
-
 		disconnectChan := make(chan struct{})
 		server := dap.NewServer(&service.Config{
 			Listener:             listener,
@@ -407,13 +405,10 @@ func dapCmd(cmd *cobra.Command, args []string) {
 			CheckGoVersion:       CheckGoVersion,
 			DisconnectChan:       disconnectChan,
 		})
-		server.Run()
+		defer server.Stop()
 
+		server.Run()
 		waitForDisconnectSignal(disconnectChan)
-		err = server.Stop()
-		if err != nil {
-			fmt.Println(err)
-		}
 		return 0
 	}()
 	os.Exit(status)
@@ -610,6 +605,12 @@ func connectCmd(cmd *cobra.Command, args []string) {
 	os.Exit(connect(addr, nil, conf, executingOther))
 }
 
+// waitForDisconnectSignal is a blocking function that waits for either
+// a SIGINT (Ctrl-C) signal from the OS or for disconnectChan to be closed
+// by the server when the client disconnects.
+// Note that in headless mode, the debugged process is foregrounded
+// (to have control of the tty for debugging interactive programs),
+// so SIGINT gets sent to the debuggee and not to delve.
 func waitForDisconnectSignal(disconnectChan chan struct{}) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT)
@@ -631,6 +632,7 @@ func waitForDisconnectSignal(disconnectChan chan struct{}) {
 		select {
 		case <-ch:
 		case <-disconnectChan:
+			fmt.Println("client disconnected!!!")
 		}
 	}
 }
