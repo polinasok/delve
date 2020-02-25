@@ -48,6 +48,10 @@ func (c *Client) send(request dap.Message) {
 	dap.WriteProtocolMessage(c.conn, request)
 }
 
+func (c *Client) ReadMessage() (dap.Message, error) {
+	return dap.ReadProtocolMessage(c.reader)
+}
+
 func (c *Client) expectReadProtocolMessage(t *testing.T) dap.Message {
 	t.Helper()
 	m, err := dap.ReadProtocolMessage(c.reader)
