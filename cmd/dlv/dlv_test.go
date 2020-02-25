@@ -537,7 +537,7 @@ func TestDap(t *testing.T) {
 		}
 		go func() {
 			for scanErr.Scan() {
-                t.Log(scanErr.Text())
+				t.Log(scanErr.Text())
 			}
 		}()
 
