@@ -21,8 +21,8 @@ import (
 
 	protest "github.com/go-delve/delve/pkg/proc/test"
 	"github.com/go-delve/delve/pkg/terminal"
-	"github.com/go-delve/delve/service/rpc2"
 	"github.com/go-delve/delve/service/dap/daptest"
+	"github.com/go-delve/delve/service/rpc2"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -512,42 +512,42 @@ func TestTypecheckRPC(t *testing.T) {
 
 // TestDap verifies that a dap server can be started and shut down.
 func TestDap(t *testing.T) {
-		const addr = "127.0.0.1:40575"
+	const listenAddr = "127.0.0.1:40575"
 
-		dlvbin, tmpdir := getDlvBin(t)
-		defer os.RemoveAll(tmpdir)
+	dlvbin, tmpdir := getDlvBin(t)
+	defer os.RemoveAll(tmpdir)
 
-		cmd := exec.Command(dlvbin, "dap", "--log-output=dap", "--log", "--listen", addr)
-		stdout, err := cmd.StdoutPipe()
-		assertNoError(err, t, "stdout pipe")
-		stderr, err := cmd.StderrPipe()
-		assertNoError(err, t, "stderr pipe")
-		if err := cmd.Start(); err != nil {
-                t.Fatalf("could not start dap instance: %v", err)
+	cmd := exec.Command(dlvbin, "dap", "--log-output=dap", "--log", "--listen", listenAddr)
+	stdout, err := cmd.StdoutPipe()
+	assertNoError(err, t, "stdout pipe")
+	stderr, err := cmd.StderrPipe()
+	assertNoError(err, t, "stderr pipe")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start dap instance: %v", err)
+	}
+
+	scanOut := bufio.NewScanner(stdout)
+	scanErr := bufio.NewScanner(stderr)
+	// Wait for the debug server to start
+	scanOut.Scan()
+	listening := "DAP server listening at: " + listenAddr
+	if scanOut.Text() != listening {
+		cmd.Process.Kill() // release the port
+		t.Fatalf("Unexpected stdout:\ngot  %q\nwant %q", scanOut.Text(), listening)
+	}
+	go func() {
+		for scanErr.Scan() {
+			t.Log(scanErr.Text())
 		}
+	}()
 
-		scanOut := bufio.NewScanner(stdout)
-		scanErr := bufio.NewScanner(stderr)
-		// Wait for the debug server to start
-		scanOut.Scan()
-		listening := "DAP server listening at: " + addr
-		if scanOut.Text() != listening {
-			cmd.Process.Kill() // release the port
-			t.Fatalf("Unexpected stdout:\ngot  %q\nwant %q", scanOut.Text(), listening)
-		}
-		go func() {
-			for scanErr.Scan() {
-				t.Log(scanErr.Text())
-			}
-		}()
-
-		// Connect a client and request shutdown.
-		client := daptest.NewClient(addr)
-		client.DisconnectRequest()
-		client.ExpectDisconnectResponse(t)
-		if _, err := client.ReadMessage(); err != io.EOF {
-			t.Errorf("got %q, want \"EOF\"\n", err)
-		}
-		client.Close()
-		cmd.Wait()
+	// Connect a client and request shutdown.
+	client := daptest.NewClient(listenAddr)
+	client.DisconnectRequest()
+	client.ExpectDisconnectResponse(t)
+	if _, err := client.ReadMessage(); err != io.EOF {
+		t.Errorf("got %q, want \"EOF\"\n", err)
+	}
+	client.Close()
+	cmd.Wait()
 }
