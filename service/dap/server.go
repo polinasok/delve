@@ -56,6 +56,8 @@ type Server struct {
 	stopOnEntry bool
 	// binaryToRemove is the compiled binary to be removed on disconnect.
 	binaryToRemove string
+	// goroutines is tracks ids to identify new and terminated goroutines.
+	goroutines []int
 }
 
 // NewServer creates a new DAP Server. It takes an opened Listener
@@ -453,6 +455,41 @@ func (s *Server) onContinueRequest(request *dap.ContinueRequest) {
 	s.doContinue()
 }
 
+func (s *Server) updateGoroutines(goids []int) {
+	var contains = func(ids []int, theid int) bool {
+		for _, id := range ids {
+			if id == theid {
+				return true
+			}
+		}
+		return false
+	}
+	var sawBefore = func(gid int) bool { return contains(s.goroutines, gid) }
+	var seeNow = func(gid int) bool { return contains(goids, gid) }
+
+	// Start event for all new goroutines that were not seen before
+	for _, gid := range goids {
+		if !sawBefore(gid) {
+			e := &dap.ThreadEvent{Event: *newEvent("thread")}
+			e.Body.Reason = "started"
+			e.Body.ThreadId = gid
+			s.send(e)
+			s.goroutines = append(s.goroutines, gid)
+		}
+	}
+	// Stop event for all existing goroutines that are no longer there
+	for i, gid := range s.goroutines {
+		if !seeNow(gid) {
+			e := &dap.ThreadEvent{Event: *newEvent("thread")}
+			e.Body.Reason = "exited"
+			e.Body.ThreadId = gid
+			s.send(e)
+			s.goroutines = append(s.goroutines[:i], s.goroutines[i+1:]...)
+		}
+	}
+	s.log.Debug("goroutines=", s.goroutines)
+}
+
 func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 	if s.debugger == nil {
 		s.sendErrorResponse(request.Request, UnableToDisplayThreads, "Unable to display threads", "debugger is nil")
@@ -480,14 +517,17 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 		// (dummy) thread".
 		threads = []dap.Thread{{Id: 1, Name: "Dummy"}}
 	} else {
+		goids := make([]int, len(gs))
 		for i, g := range gs {
 			threads[i].Id = g.ID
+			goids[i] = g.ID
 			if loc := g.UserCurrentLoc; loc.Function != nil {
 				threads[i].Name = loc.Function.Name()
 			} else {
 				threads[i].Name = fmt.Sprintf("%s@%d", loc.File, loc.Line)
 			}
 		}
+		s.updateGoroutines(goids)
 	}
 	response := &dap.ThreadsResponse{
 		Response: *newResponse(request.Request),
@@ -570,6 +610,15 @@ func (s *Server) doContinue() {
 		e := &dap.TerminatedEvent{Event: *newEvent("terminated")}
 		s.send(e)
 	} else {
+		gs, _, err := s.debugger.Goroutines(0, 0)
+		if err == nil {
+			goids := make([]int, len(gs))
+			for i, g := range gs {
+				goids[i] = g.ID
+			}
+			s.updateGoroutines(goids)
+		}
+
 		e := &dap.StoppedEvent{Event: *newEvent("stopped")}
 		// TODO(polina): differentiate between breakpoint and pause on halt.
 		e.Body.Reason = "breakpoint"

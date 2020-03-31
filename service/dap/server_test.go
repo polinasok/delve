@@ -282,16 +282,45 @@ func TestSetBreakpoint(t *testing.T) {
 		// with dummy response here once server becomes async
 		// to match what happens in VS Code.
 
-		stopEvent1 := client.ExpectStoppedEvent(t)
-		if stopEvent1.Body.Reason != "breakpoint" ||
-			stopEvent1.Body.ThreadId != 1 ||
-			!stopEvent1.Body.AllThreadsStopped {
-			t.Errorf("got %#v, want Body={Reason=\"breakpoint\", ThreadId=1, AllThreadsStopped=true}", stopEvent1)
+		// Expect more than one thread event before the stopped event.
+		threadEventCount := 0
+		foundThreadID1 := false
+		var msg dap.Message
+	Loop:
+		for {
+			msg = client.ExpectReadProtocolMessage(t)
+			switch msg := msg.(type) {
+			case *dap.ThreadEvent:
+				threadEventCount++
+				if msg.Body.Reason != "started" {
+					t.Errorf("got %#v, want Reason=\"started\"", msg)
+				}
+				// TODO(polina): add unittest for "exited" reason events
+				if msg.Body.ThreadId == 1 {
+					foundThreadID1 = true
+				}
+			default:
+				break Loop
+			}
+		}
+		if threadEventCount < 2 { // 1 main + 1+ runtime
+			t.Errorf("got %d threads, want >1", threadEventCount)
+		}
+		if !foundThreadID1 {
+			t.Errorf("no thread event with id 1")
+		}
+
+		stopEvent, ok := msg.(*dap.StoppedEvent)
+		if !ok ||
+			stopEvent.Body.Reason != "breakpoint" ||
+			stopEvent.Body.ThreadId != 1 ||
+			!stopEvent.Body.AllThreadsStopped {
+			t.Errorf("got %#v, want StoppedEvent{Body={Reason=\"breakpoint\", ThreadId=1, AllThreadsStopped=true}}", stopEvent)
 		}
 
 		client.ThreadsRequest()
 		tResp := client.ExpectThreadsResponse(t)
-		if len(tResp.Body.Threads) < 2 { // 1 main + runtime
+		if len(tResp.Body.Threads) < 2 { // 1 main + 1+ runtime
 			t.Errorf("\ngot  %#v\nwant len(Threads)>1", tResp.Body.Threads)
 		}
 		// TODO(polina): can we reliably test for these values?
