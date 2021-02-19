@@ -254,7 +254,7 @@ func (dbp *nativeProcess) ContinueOnce() (proc.Thread, proc.StopReason, error) {
 		}
 		if trapthread != nil {
 			dbp.memthread = trapthread
-			fmt.Println("natve no err")
+			fmt.Println("native no err")
 			return trapthread, proc.StopUnknown, nil
 		}
 	}
