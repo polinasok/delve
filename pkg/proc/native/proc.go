@@ -1,6 +1,7 @@
 package native
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"sync"
@@ -219,13 +220,16 @@ func (dbp *nativeProcess) EraseBreakpoint(bp *proc.Breakpoint) error {
 // ContinueOnce will continue the target until it stops.
 // This could be the result of a breakpoint or signal.
 func (dbp *nativeProcess) ContinueOnce() (proc.Thread, proc.StopReason, error) {
+	fmt.Println("natve continue once")
 	if dbp.exited {
+		fmt.Println("natve exited")
 		return nil, proc.StopExited, &proc.ErrProcessExited{Pid: dbp.Pid()}
 	}
 
 	for {
 
 		if err := dbp.resume(); err != nil {
+			fmt.Println("natve resume returned err", err)
 			return nil, proc.StopUnknown, err
 		}
 
@@ -240,14 +244,17 @@ func (dbp *nativeProcess) ContinueOnce() (proc.Thread, proc.StopReason, error) {
 
 		trapthread, err := dbp.trapWait(-1)
 		if err != nil {
+			fmt.Println("natve trapwait returned err", err)
 			return nil, proc.StopUnknown, err
 		}
 		trapthread, err = dbp.stop(trapthread)
 		if err != nil {
+			fmt.Println("natve stop returned err", err)
 			return nil, proc.StopUnknown, err
 		}
 		if trapthread != nil {
 			dbp.memthread = trapthread
+			fmt.Println("natve no err")
 			return trapthread, proc.StopUnknown, nil
 		}
 	}
