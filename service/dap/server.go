@@ -869,7 +869,11 @@ func (s *Server) onConfigurationDoneRequest(request *dap.ConfigurationDoneReques
 	if s.debugger != nil && s.args.stopOnEntry {
 		e := &dap.StoppedEvent{
 			Event: *newEvent("stopped"),
-			Body:  dap.StoppedEventBody{Reason: "entry", ThreadId: 1, AllThreadsStopped: true},
+			// There is no selected goroutine on entry. The current thread has goroutine id 0,
+			// but we cannot use that because ThreadId is omitempty. -1 is the next best thing.
+			// TODO(polina): fix omitempty
+			// TODO(polina): actually load threads/goroutine here to confirm?
+			Body: dap.StoppedEventBody{Reason: "entry", ThreadId: -1, AllThreadsStopped: true},
 		}
 		s.send(e)
 	}
@@ -911,6 +915,10 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 		return
 	}
 
+	// -1 is a special goroutine id, which means the currently selected goroutine
+	// or the current thread if it isn't running a goroutine (== goroutine id 0)
+	current := dap.Thread{Id: -1, Name: "Current"}
+
 	threads := make([]dap.Thread, len(gs))
 	if len(threads) == 0 {
 		// Depending on the debug session stage, goroutines information
@@ -918,7 +926,7 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 		// "even if a debug adapter does not support multiple threads,
 		// it must implement the threads request and return a single
 		// (dummy) thread".
-		threads = []dap.Thread{{Id: 1, Name: "Dummy"}}
+		threads = []dap.Thread{current}
 	} else {
 		state, err := s.debugger.State( /*nowait*/ true)
 		if err != nil {
@@ -928,10 +936,12 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 		s.debugger.LockTarget()
 		defer s.debugger.UnlockTarget()
 
+		foundSelected := false
 		for i, g := range gs {
 			selected := ""
 			if state.SelectedGoroutine != nil && g.ID == state.SelectedGoroutine.ID {
 				selected = "* "
+				foundSelected = true
 			}
 			thread := ""
 			if g.Thread != nil && g.Thread.ThreadID() != 0 {
@@ -942,6 +952,10 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 			loc := g.UserCurrent()
 			threads[i].Name = fmt.Sprintf("%s[Go %d] %s%s", selected, g.ID, fnName(&loc), thread)
 			threads[i].Id = g.ID
+		}
+		if !foundSelected {
+			// TODO(polina): or should we just switch to a real goroutine? E.g. one with thread.
+			threads = append(threads, current)
 		}
 	}
 	response := &dap.ThreadsResponse{

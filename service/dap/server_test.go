@@ -94,9 +94,9 @@ func runTest(t *testing.T, name string, test func(c *daptest.Client, f protest.F
 // - Program stops upon launching  :    << stopped event
 //                                 :  5 << configurationDone
 //                                 :  6 >> threads
-//                                 :  6 << threads (Dummy)
+//                                 :  6 << threads (Current)
 //                                 :  7 >> threads
-//                                 :  7 << threads (Dummy)
+//                                 :  7 << threads (Current)
 //                                 :  8 >> stackTrace
 //                                 :  8 << error (Unable to produce stack trace)
 //                                 :  9 >> stackTrace
@@ -153,9 +153,9 @@ func TestLaunchStopOnEntry(t *testing.T) {
 		stopEvent := client.ExpectStoppedEvent(t)
 		if stopEvent.Seq != 0 ||
 			stopEvent.Body.Reason != "entry" ||
-			stopEvent.Body.ThreadId != 1 ||
+			stopEvent.Body.ThreadId != -1 ||
 			!stopEvent.Body.AllThreadsStopped {
-			t.Errorf("\ngot %#v\nwant Seq=0, Body={Reason=\"entry\", ThreadId=1, AllThreadsStopped=true}", stopEvent)
+			t.Errorf("\ngot %#v\nwant Seq=0, Body={Reason=\"entry\", ThreadId=-1, AllThreadsStopped=true}", stopEvent)
 		}
 		cdResp := client.ExpectConfigurationDoneResponse(t)
 		if cdResp.Seq != 0 || cdResp.RequestSeq != 5 {
@@ -168,8 +168,8 @@ func TestLaunchStopOnEntry(t *testing.T) {
 		if tResp.Seq != 0 || tResp.RequestSeq != 6 || len(tResp.Body.Threads) != 1 {
 			t.Errorf("\ngot %#v\nwant Seq=0, RequestSeq=6 len(Threads)=1", tResp)
 		}
-		if tResp.Body.Threads[0].Id != 1 || tResp.Body.Threads[0].Name != "Dummy" {
-			t.Errorf("\ngot %#v\nwant Id=1, Name=\"Dummy\"", tResp)
+		if tResp.Body.Threads[0].Id != -1 || tResp.Body.Threads[0].Name != "Current" {
+			t.Errorf("\ngot %#v\nwant Id=1, Name=\"Current\"", tResp)
 		}
 
 		// 7 >> threads, << threads
@@ -298,9 +298,9 @@ func TestAttachStopOnEntry(t *testing.T) {
 		stopEvent := client.ExpectStoppedEvent(t)
 		if stopEvent.Seq != 0 ||
 			stopEvent.Body.Reason != "entry" ||
-			stopEvent.Body.ThreadId != 1 ||
+			stopEvent.Body.ThreadId != -1 ||
 			!stopEvent.Body.AllThreadsStopped {
-			t.Errorf("\ngot %#v\nwant Seq=0, Body={Reason=\"entry\", ThreadId=1, AllThreadsStopped=true}", stopEvent)
+			t.Errorf("\ngot %#v\nwant Seq=0, Body={Reason=\"entry\", ThreadId=-1, AllThreadsStopped=true}", stopEvent)
 		}
 		cdResp := client.ExpectConfigurationDoneResponse(t)
 		if cdResp.Seq != 0 || cdResp.RequestSeq != 5 {
@@ -453,7 +453,7 @@ func TestPreSetBreakpoint(t *testing.T) {
 		if stopEvent1.Body.Reason != "breakpoint" ||
 			stopEvent1.Body.ThreadId != 1 ||
 			!stopEvent1.Body.AllThreadsStopped {
-			t.Errorf("got %#v, want Body={Reason=\"breakpoint\", ThreadId=1, AllThreadsStopped=true}", stopEvent1)
+			t.Errorf("got %#v, want Body={Reason=\"breakpoint\", ThreadId=-1, AllThreadsStopped=true}", stopEvent1)
 		}
 
 		client.ThreadsRequest()
